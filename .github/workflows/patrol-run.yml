@@ -1,0 +1,70 @@
+name: patrol-run
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ahapeter/patrol
+  SQLITE_PKG: patrol-results
+  SQLITE_FILE: patrol.db
+
+jobs:
+  patrol:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install oras
+        run: |
+          curl -LO "https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz"
+          tar -xzf oras_1.2.2_linux_amd64.tar.gz
+          sudo mv oras /usr/local/bin/
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Pull patrol image
+        run: docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Download previous SQLite from GitHub Packages
+        continue-on-error: true
+        run: |
+          mkdir -p data
+          oras pull ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.SQLITE_PKG }}:latest \
+            --output data/ 2>/dev/null || echo "No previous sqlite found, starting fresh"
+
+      - name: Run patrol
+        run: |
+          docker run --rm \
+            -v "$(pwd)/data:/data" \
+            -e PATROL_DB_PATH="/data/${{ env.SQLITE_FILE }}" \
+            -e PATROL_SLACK_TOKEN="${{ secrets.SLACK_TOKEN }}" \
+            -e PATROL_SLACK_CHANNEL="${{ secrets.SLACK_CHANNEL }}" \
+            -e PATROL_SLACK_MENTIONS="${{ secrets.SLACK_MENTIONS }}" \
+            -e PATROL_RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -e PATROL_MQTT_BROKER="${{ secrets.PATROL_MQTT_BROKER }}" \
+            -e PATROL_PRESENTER_API="${{ secrets.PATROL_PRESENTER_API }}" \
+            -e PATROL_AUDIENCE_API="${{ secrets.PATROL_AUDIENCE_API }}" \
+            -e PATROL_PRESENTATION_ID="${{ secrets.PATROL_PRESENTATION_ID }}" \
+            -e PATROL_SLIDE_ID="${{ secrets.PATROL_SLIDE_ID }}" \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Push SQLite to GitHub Packages
+        if: always()
+        run: |
+          cd data
+          echo "${{ secrets.GHCR_TOKEN }}" | oras login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+          oras push ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.SQLITE_PKG }}:latest \
+            ${{ env.SQLITE_FILE }}:application/octet-stream
